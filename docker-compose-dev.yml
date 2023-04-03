@@ -1,0 +1,10 @@
+services:
+  photobot:
+    container_name: photobot
+    build: .
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: "${BOT_TOKEN}"
+      DEVELOPER_CHAT_ID: "${DEVELOPER_CHAT_ID}"
+    volumes:
+      - $PWD/files:/files

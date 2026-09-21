@@ -4,7 +4,7 @@ services:
     image: ghcr.io/jserrats/photobot:latest
     build: .
     restart: unless-stopped
-    # Runs as uid/gid 1000 inside the image; override if ./files is owned by someone else.
+    # Runs as uid/gid 1000 inside the image; override if the storage directory is owned by someone else.
     user: "${PUID:-1000}:${PGID:-1000}"
     read_only: true
     security_opt:
@@ -18,4 +18,5 @@ services:
     environment:
       DOWNLOAD_DIR: /files
     volumes:
-      - ./files:/files
+      # Host directory where pictures and videos are stored (default ./files).
+      - ${HOST_FILES_DIR:-./files}:/files

@@ -34,8 +34,13 @@ mkdir -p files && sudo chown 1000:1000 files
 docker compose up -d
 ```
 
+Pictures and videos land in `./files` next to the compose file by default. To store them
+elsewhere on the host, set `HOST_FILES_DIR` in `.env` to an absolute path, for example
+`HOST_FILES_DIR=/mnt/storage/photos`. The directory must exist and be writable by the
+container's user.
+
 The container runs as uid 1000 with a read-only root filesystem and no capabilities. If your
-`files` directory is owned by a different user, set `PUID` and `PGID` in `.env`.
+storage directory is owned by a different user, set `PUID` and `PGID` in `.env` to match.
 
 Images are published to `ghcr.io/jserrats/photobot` for `linux/amd64` and `linux/arm64` on
 every push to `master` and on `v*` tags.

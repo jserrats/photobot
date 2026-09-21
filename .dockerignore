@@ -10,4 +10,3 @@ tests
 .pytest_cache
 .ruff_cache
 docker-compose*.yml
-README.md

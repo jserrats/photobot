@@ -1,16 +1,38 @@
-FROM python:3.8
+# syntax=docker/dockerfile:1.7
 
-ENV LANG C.UTF-8
-ENV LC_ALL C.UTF-8
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONFAULTHANDLER 1
+# ---- build stage: resolve and install locked dependencies into a venv ----
+FROM python:3.13-slim AS builder
 
+COPY --from=ghcr.io/astral-sh/uv:0.12.9 /uv /usr/local/bin/uv
 
-COPY Pipfile Pipfile.lock ./
-RUN python -m pip install --upgrade pip
-RUN pip install pipenv && pipenv install --dev --system --deploy
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
-COPY . /app/
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable
 
-ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]
+# ---- runtime stage: minimal image, non-root user ----
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1 \
+    PATH="/app/.venv/bin:$PATH" \
+    DOWNLOAD_DIR=/files
+
+RUN groupadd --system --gid 1000 photobot \
+    && useradd --system --uid 1000 --gid photobot --no-create-home photobot \
+    && mkdir -p /files \
+    && chown photobot:photobot /files
+
+COPY --from=builder --chown=photobot:photobot /app/.venv /app/.venv
+
+USER photobot
+WORKDIR /app
+VOLUME ["/files"]
+
+ENTRYPOINT ["photobot"]

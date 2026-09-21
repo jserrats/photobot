@@ -1,0 +1,21 @@
+services:
+  photobot:
+    container_name: photobot
+    image: ghcr.io/jserrats/photobot:latest
+    build: .
+    restart: unless-stopped
+    # Runs as uid/gid 1000 inside the image; override if ./files is owned by someone else.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    env_file:
+      - .env
+    environment:
+      DOWNLOAD_DIR: /files
+    volumes:
+      - ./files:/files

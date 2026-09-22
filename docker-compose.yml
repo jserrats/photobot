@@ -13,9 +13,12 @@ services:
       - ALL
     tmpfs:
       - /tmp
-    env_file:
-      - .env
+    # Values come from compose interpolation: a .env file next to this compose file,
+    # the shell, or the "Environment variables" page of a container manager UI.
     environment:
+      BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN is required (token from @BotFather)}
+      DEVELOPER_CHAT_ID: ${DEVELOPER_CHAT_ID:?DEVELOPER_CHAT_ID is required (numeric chat id)}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DOWNLOAD_DIR: /files
     volumes:
       # Host directory where pictures and videos are stored (default ./files).

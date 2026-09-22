@@ -34,6 +34,12 @@ mkdir -p files && sudo chown 1000:1000 files
 docker compose up -d
 ```
 
+All settings are passed through compose interpolation (`${VAR}`) into the service's
+`environment:` section. Docker Compose reads them from `.env` next to the compose file or from
+the shell. Container manager UIs such as Synology Container Manager or Portainer expose them
+as project "Environment variables". `BOT_TOKEN` and `DEVELOPER_CHAT_ID` are marked required, so
+`docker compose up` fails immediately with a clear message if either is missing.
+
 Pictures and videos land in `./files` next to the compose file by default. To store them
 elsewhere on the host, set `HOST_FILES_DIR` in `.env` to an absolute path, for example
 `HOST_FILES_DIR=/mnt/storage/photos`. The directory must exist and be writable by the

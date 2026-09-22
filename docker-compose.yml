@@ -20,6 +20,9 @@ services:
       DEVELOPER_CHAT_ID: ${DEVELOPER_CHAT_ID:?DEVELOPER_CHAT_ID is required (numeric chat id)}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DOWNLOAD_DIR: /files
+      # Local time zone for the "Today"/"Yesterday" buttons of the capture-date prompt.
+      TZ: ${TZ:-UTC}
+      DATE_PROMPT_WINDOW_SECONDS: ${DATE_PROMPT_WINDOW_SECONDS:-30}
     volumes:
       # Host directory where pictures and videos are stored (default ./files).
       - ${HOST_FILES_DIR:-./files}:/files

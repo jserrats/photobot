@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
 dependencies = [
+    "piexif>=1.1.3,<2",
     "python-telegram-bot>=22.8,<23",
+    # zoneinfo's fallback database, so TZ works on images without the system tzdata.
+    "tzdata>=2024.1",
 ]
 
 [project.scripts]
@@ -50,6 +53,11 @@ select = [
 python_version = "3.13"
 strict = true
 files = ["src"]
+
+# piexif ships no type stubs.
+[[tool.mypy.overrides]]
+module = "piexif"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -14,6 +14,28 @@ directory on disk. Useful as a "send it to my server" inbox from your phone.
   instead of crashing.
 - Unhandled exceptions are logged and forwarded to the authorized chat.
 
+## Capture dates
+
+Telegram strips EXIF from photos sent "compressed", so a photo library sorts them by the
+moment the bot received them rather than by when they were taken. To fix that, the bot asks.
+
+- After a photo is saved, if it is a JPEG with no `DateTimeOriginal` tag, it joins a batch.
+  `DATE_PROMPT_WINDOW_SECONDS` after the *last* photo arrives, the bot sends one question for
+  the whole batch, so an album or a burst of sends costs a single tap.
+- The buttons offer Today, Yesterday, the three days before that, **Other date…** and
+  **Skip**. "Other date…" asks you to type one; `YYYY-MM-DD`, `DD/MM/YYYY` and `DD.MM.YYYY`
+  are accepted. Set `TZ` so that "Today" means your today and not UTC's.
+- The chosen date is written at 12:00:00 into `DateTimeOriginal`, `DateTimeDigitized` and
+  `DateTime` (EXIF carries no time zone), and the file's mtime is set to match. Only the EXIF
+  segment is rewritten, so the compressed image data is copied through byte for byte.
+- Videos are never asked about: MP4 has no EXIF. A photo that arrives with a capture date
+  already set is not asked about either.
+- Pending questions live in memory. Restarting the bot forgets any unanswered one; the files
+  are already on disk with the date they were received, so nothing is lost — resend the photo
+  if you want to be asked again.
+- Synology Photos indexes on import. It may need a re-index (or a move out of and back into
+  the watched folder) before a newly written date shows up in the timeline.
+
 ## Configuration
 
 | Variable            | Required | Description                                                     |
@@ -22,6 +44,8 @@ directory on disk. Useful as a "send it to my server" inbox from your phone.
 | `DEVELOPER_CHAT_ID` | yes      | Numeric id of the only chat allowed to use the bot.             |
 | `DOWNLOAD_DIR`      | no       | Directory to save into. Default `/files`.                       |
 | `LOG_LEVEL`         | no       | `DEBUG`, `INFO`, `WARNING` or `ERROR`. Default `INFO`.          |
+| `TZ`                | no       | IANA time zone for the date buttons. Default `UTC`.             |
+| `DATE_PROMPT_WINDOW_SECONDS` | no | Quiet period before the date question. Default `30`.       |
 
 To find your chat id: start the bot with any placeholder `DEVELOPER_CHAT_ID`, send it a
 message, and read the id from the `Ignoring update from unauthorized chat` line in the logs.
@@ -60,5 +84,5 @@ uv sync                    # create .venv with dev tools
 uv run ruff check . && uv run ruff format --check .
 uv run mypy
 uv run pytest
-BOT_TOKEN=... DEVELOPER_CHAT_ID=... DOWNLOAD_DIR=./files uv run photobot
+BOT_TOKEN=... DEVELOPER_CHAT_ID=... DOWNLOAD_DIR=./files TZ=Europe/Madrid uv run photobot
 ```

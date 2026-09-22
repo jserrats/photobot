@@ -19,9 +19,13 @@ directory on disk. Useful as a "send it to my server" inbox from your phone.
 Telegram strips EXIF from photos sent "compressed", so a photo library sorts them by the
 moment the bot received them rather than by when they were taken. To fix that, the bot asks.
 
-- After a photo is saved, if it is a JPEG with no `DateTimeOriginal` tag, it joins a batch.
-  `DATE_PROMPT_WINDOW_SECONDS` after the *last* photo arrives, the bot sends one question for
-  the whole batch, so an album or a burst of sends costs a single tap.
+- As soon as a photo is saved, if it is a JPEG with no `DateTimeOriginal` tag, the bot asks.
+  Send several in a row and they join one batch: the bot deletes the previous picker and
+  resends it, so there is always exactly one question, it is always the last message in the
+  chat, and one tap dates the whole burst.
+- A batch stops taking new photos once it has been quiet for `DATE_PROMPT_WINDOW_SECONDS`, or
+  as soon as you start answering it. The next photo then gets a question of its own, so a
+  morning and an evening batch can have different dates.
 - The buttons offer Today, Yesterday, the three days before that, **Other date…** and
   **Skip**. "Other date…" asks you to type one; `YYYY-MM-DD`, `DD/MM/YYYY` and `DD.MM.YYYY`
   are accepted. Set `TZ` so that "Today" means your today and not UTC's.
@@ -45,7 +49,7 @@ moment the bot received them rather than by when they were taken. To fix that, t
 | `DOWNLOAD_DIR`      | no       | Directory to save into. Default `/files`.                       |
 | `LOG_LEVEL`         | no       | `DEBUG`, `INFO`, `WARNING` or `ERROR`. Default `INFO`.          |
 | `TZ`                | no       | IANA time zone for the date buttons. Default `UTC`.             |
-| `DATE_PROMPT_WINDOW_SECONDS` | no | Quiet period before the date question. Default `30`.       |
+| `DATE_PROMPT_WINDOW_SECONDS` | no | How long a batch keeps taking photos. Default `30`.        |
 
 To find your chat id: start the bot with any placeholder `DEVELOPER_CHAT_ID`, send it a
 message, and read the id from the `Ignoring update from unauthorized chat` line in the logs.

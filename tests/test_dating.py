@@ -97,61 +97,168 @@ def test_batch_ids_are_short_and_unique() -> None:
     assert all(len(i) == 8 for i in ids)
 
 
-async def test_adds_within_the_window_share_one_batch(tmp_path: Path) -> None:
+async def test_the_picker_appears_immediately_and_once_per_photo(tmp_path: Path) -> None:
     tracker = BatchTracker()
-    ready: list[PendingBatch] = []
+    seen: list[list[str]] = []
 
-    async def on_ready(batch: PendingBatch) -> None:
-        ready.append(batch)
+    async def on_change(batch: PendingBatch) -> None:
+        seen.append([p.name for p in batch.paths])
+
+    loop = asyncio.get_running_loop()
+    tracker.add(tmp_path / "a.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0)  # let the refresh task run
+    assert seen == [["a.jpg"]]
+
+    tracker.add(tmp_path / "b.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0)
+    assert seen == [["a.jpg"], ["a.jpg", "b.jpg"]]
+
+    # One batch throughout, registered for callbacks from the very first photo.
+    assert tracker.open is not None
+    assert list(tracker.pending) == [tracker.open.id]
+    tracker.seal(tracker.open)
+
+
+async def test_a_simultaneous_burst_costs_one_picker(tmp_path: Path) -> None:
+    """An album arrives in one go: send one picker for all of it, not three."""
+    tracker = BatchTracker()
+    order: list[str] = []
+
+    async def on_change(batch: PendingBatch) -> None:
+        n = len(batch.paths)
+        order.append(f"start{n}")
+        await asyncio.sleep(0.01)
+        order.append(f"end{n}")
 
     loop = asyncio.get_running_loop()
     for name in ("a.jpg", "b.jpg", "c.jpg"):
-        tracker.add(tmp_path / name, window=WINDOW, loop=loop, on_ready=on_ready)
-        await asyncio.sleep(WINDOW / 4)
+        tracker.add(tmp_path / name, window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0.1)
 
-    assert ready == []  # still collecting
-    await asyncio.sleep(WINDOW * 3)
-
-    assert len(ready) == 1
-    assert [p.name for p in ready[0].paths] == ["a.jpg", "b.jpg", "c.jpg"]
-    assert tracker.open is None
-    assert tracker.pending == {ready[0].id: ready[0]}
+    assert order == ["start3", "end3"]
 
 
-async def test_a_later_photo_starts_a_new_batch(tmp_path: Path) -> None:
+async def test_a_photo_during_a_send_gets_its_own_refresh(tmp_path: Path) -> None:
+    """Never leave the picker showing a stale count."""
     tracker = BatchTracker()
-    ready: list[PendingBatch] = []
+    order: list[str] = []
 
-    async def on_ready(batch: PendingBatch) -> None:
-        ready.append(batch)
+    async def on_change(batch: PendingBatch) -> None:
+        n = len(batch.paths)
+        order.append(f"start{n}")
+        await asyncio.sleep(0.02)
+        order.append(f"end{n}")
 
     loop = asyncio.get_running_loop()
-    tracker.add(tmp_path / "a.jpg", window=WINDOW, loop=loop, on_ready=on_ready)
-    await asyncio.sleep(WINDOW * 3)
-    tracker.add(tmp_path / "b.jpg", window=WINDOW, loop=loop, on_ready=on_ready)
-    await asyncio.sleep(WINDOW * 3)
+    tracker.add(tmp_path / "a.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0.01)  # mid-send
+    tracker.add(tmp_path / "b.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0.1)
 
-    assert len(ready) == 2
-    assert ready[0].id != ready[1].id
-    assert [p.name for p in ready[0].paths] == ["a.jpg"]
-    assert [p.name for p in ready[1].paths] == ["b.jpg"]
+    # Serialised, and the second run reports both photos.
+    assert order == ["start1", "end1", "start2", "end2"]
 
 
-async def test_a_failing_prompt_drops_the_batch(tmp_path: Path) -> None:
+async def test_photos_in_a_row_share_one_batch(tmp_path: Path) -> None:
     tracker = BatchTracker()
 
-    async def on_ready(batch: PendingBatch) -> None:
+    async def on_change(batch: PendingBatch) -> None:
+        batch.prompt_message_id = 100 + len(batch.paths)
+
+    loop = asyncio.get_running_loop()
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        tracker.add(tmp_path / name, window=WINDOW, loop=loop, on_change=on_change)
+        await asyncio.sleep(WINDOW / 4)
+
+    assert len(tracker.pending) == 1
+    batch = next(iter(tracker.pending.values()))
+    assert [p.name for p in batch.paths] == ["a.jpg", "b.jpg", "c.jpg"]
+    assert batch.prompt_message_id == 103  # the newest picker, not the first
+
+
+async def test_a_photo_after_the_window_starts_a_new_batch(tmp_path: Path) -> None:
+    tracker = BatchTracker()
+
+    async def on_change(batch: PendingBatch) -> None:
+        return None
+
+    loop = asyncio.get_running_loop()
+    tracker.add(tmp_path / "a.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(WINDOW * 3)
+    assert tracker.open is None  # sealed, but still waiting for its answer
+    assert len(tracker.pending) == 1
+
+    tracker.add(tmp_path / "b.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(WINDOW * 3)
+
+    assert len(tracker.pending) == 2
+    first, second = tracker.pending.values()
+    assert [p.name for p in first.paths] == ["a.jpg"]
+    assert [p.name for p in second.paths] == ["b.jpg"]
+
+
+async def test_an_answered_batch_does_not_collect_more_photos(tmp_path: Path) -> None:
+    tracker = BatchTracker()
+
+    async def on_change(batch: PendingBatch) -> None:
+        return None
+
+    loop = asyncio.get_running_loop()
+    tracker.add(tmp_path / "a.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0)
+    answered = tracker.pop(next(iter(tracker.pending)))
+    assert answered is not None
+    assert tracker.open is None
+
+    tracker.add(tmp_path / "b.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0)
+
+    assert [p.name for p in answered.paths] == ["a.jpg"]
+    assert len(tracker.pending) == 1
+    assert [p.name for p in next(iter(tracker.pending.values())).paths] == ["b.jpg"]
+
+
+async def test_a_failing_first_prompt_drops_the_batch(tmp_path: Path) -> None:
+    tracker = BatchTracker()
+
+    async def on_change(batch: PendingBatch) -> None:
         raise RuntimeError("telegram is down")
 
     tracker.add(
         tmp_path / "a.jpg",
         window=WINDOW,
         loop=asyncio.get_running_loop(),
-        on_ready=on_ready,
+        on_change=on_change,
     )
-    await asyncio.sleep(WINDOW * 3)
+    await asyncio.sleep(0)
 
     assert tracker.pending == {}
+
+
+async def test_a_failing_resend_keeps_the_picker_already_on_screen(tmp_path: Path) -> None:
+    tracker = BatchTracker()
+    calls = 0
+
+    async def on_change(batch: PendingBatch) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            batch.prompt_message_id = 101
+            return
+        raise RuntimeError("telegram is down")
+
+    loop = asyncio.get_running_loop()
+    tracker.add(tmp_path / "a.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0)
+    tracker.add(tmp_path / "b.jpg", window=WINDOW, loop=loop, on_change=on_change)
+    await asyncio.sleep(0)
+
+    # The first picker is still there and still answers for both photos.
+    assert len(tracker.pending) == 1
+    batch = next(iter(tracker.pending.values()))
+    assert batch.prompt_message_id == 101
+    assert [p.name for p in batch.paths] == ["a.jpg", "b.jpg"]
+    tracker.seal(batch)
 
 
 async def test_lookup_helpers(tmp_path: Path) -> None:
@@ -171,3 +278,15 @@ async def test_lookup_helpers(tmp_path: Path) -> None:
 
     assert tracker.pop("first") is first
     assert tracker.pop("first") is None
+
+
+async def test_seal_stops_collection_without_forgetting_the_batch() -> None:
+    tracker = BatchTracker()
+    batch = PendingBatch(id="only")
+    tracker.open = batch
+    tracker.pending = {"only": batch}
+
+    tracker.seal(batch)
+
+    assert tracker.open is None
+    assert tracker.get("only") is batch

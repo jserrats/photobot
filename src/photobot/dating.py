@@ -1,9 +1,12 @@
 """Grouping freshly saved photos into one batch and asking the user when they were taken.
 
 Telegram strips EXIF from photos sent "compressed", so the bot asks for the capture date
-instead of guessing. Photos that arrive together (an album, or a burst of sends) should
-produce a single question, so each arrival restarts a short quiet-period timer and only
-the last one fires the prompt.
+instead of guessing. Photos that arrive together (an album, or a burst of sends) share one
+question: the picker appears as soon as the first photo lands and is deleted and resent on
+every later one, so it stays at the bottom of the chat and its count stays honest.
+
+A batch stops accepting photos once it has been quiet for the batching window, or as soon
+as the user starts answering it. The next photo then opens a batch of its own.
 
 Batches live in memory. A restart forgets any unanswered prompt; the files are already on
 disk with the date they were received, so nothing is lost.
@@ -15,10 +18,11 @@ import asyncio
 import logging
 import re
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -52,9 +56,14 @@ class PendingBatch:
     prompt_message_id: int | None = None
     # Set once the user picked "Other date…" and we expect a typed reply.
     awaiting_text: bool = False
+    # Fires when the batch has been quiet long enough to stop accepting photos.
     timer: asyncio.TimerHandle | None = None
-    # Strong reference to the task running ``on_ready``; asyncio only holds a weak one.
-    task: asyncio.Task[None] | None = None
+    # Serialises the delete-and-resend of the prompt, so a burst of photos cannot
+    # interleave two refreshes and strand the picker halfway up the chat.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # A refresh is queued but has not started reading ``paths`` yet, so photos arriving
+    # now will be counted by it and need no refresh of their own.
+    refreshing: bool = False
 
 
 class BatchTracker:
@@ -63,6 +72,8 @@ class BatchTracker:
     def __init__(self) -> None:
         self.open: PendingBatch | None = None
         self.pending: dict[str, PendingBatch] = {}
+        # Strong references to in-flight refreshes; asyncio only holds weak ones.
+        self._tasks: set[asyncio.Task[None]] = set()
 
     def add(
         self,
@@ -70,55 +81,79 @@ class BatchTracker:
         *,
         window: float,
         loop: asyncio.AbstractEventLoop,
-        on_ready: Callable[[PendingBatch], Awaitable[None]],
+        on_change: Callable[[PendingBatch], Awaitable[None]],
     ) -> PendingBatch:
-        """Add ``path`` to the open batch and (re)start its quiet-period timer.
+        """Add ``path`` to the open batch, opening one if needed, and refresh its prompt.
 
-        ``on_ready`` is awaited ``window`` seconds after the last photo of the batch.
+        ``on_change`` is awaited straight away — the user sees the picker right after the
+        photo. It runs again for every later photo of the same batch, which is what keeps
+        the picker at the bottom of the chat. Photos that land before a queued refresh has
+        started share it rather than each triggering a send of their own.
         """
         batch = self.open
         if batch is None:
             batch = PendingBatch(id=new_batch_id())
             self.open = batch
+            # Registered before the prompt exists so a tap on a stale picker from an
+            # earlier batch can never be mistaken for this one.
+            self.pending[batch.id] = batch
         elif batch.timer is not None:
             batch.timer.cancel()
-            batch.timer = None
 
         batch.paths.append(path)
         batch.last_added = loop.time()
-        batch.timer = loop.call_later(window, self._fire, batch, loop, on_ready)
+        batch.timer = loop.call_later(window, self.seal, batch)
+        if not batch.refreshing:
+            batch.refreshing = True
+            self._spawn(loop, self._refresh(batch, on_change))
         return batch
 
-    def _fire(
+    def _spawn(self, loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, None]) -> None:
+        task = loop.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _refresh(
         self,
         batch: PendingBatch,
-        loop: asyncio.AbstractEventLoop,
-        on_ready: Callable[[PendingBatch], Awaitable[None]],
+        on_change: Callable[[PendingBatch], Awaitable[None]],
     ) -> None:
-        batch.timer = None
+        async with batch.lock:
+            # Cleared before the send, not after: a photo arriving while the picker is
+            # in flight must queue another refresh, or its count is never shown.
+            batch.refreshing = False
+            if batch.id not in self.pending:
+                # Answered in the moment between the photo landing and this running.
+                logger.warning(
+                    "Batch %s was answered before %d photo(s) could join it",
+                    batch.id,
+                    len(batch.paths),
+                )
+                return
+            try:
+                await on_change(batch)
+            except Exception:
+                logger.exception("Could not show the capture-date picker for batch %s", batch.id)
+                if batch.prompt_message_id is None:
+                    # No picker on screen means nothing can answer this batch.
+                    self.pop(batch.id)
+
+    def seal(self, batch: PendingBatch) -> None:
+        """Stop letting new photos join ``batch``; it keeps waiting for its answer."""
+        if batch.timer is not None:
+            batch.timer.cancel()
+            batch.timer = None
         if self.open is batch:
             self.open = None
-        self.pending[batch.id] = batch
-        batch.task = loop.create_task(self._run_ready(batch, on_ready))
-
-    async def _run_ready(
-        self,
-        batch: PendingBatch,
-        on_ready: Callable[[PendingBatch], Awaitable[None]],
-    ) -> None:
-        try:
-            await on_ready(batch)
-        except Exception:
-            # Without the prompt there is nothing to answer, so drop the batch rather
-            # than leave it waiting forever.
-            self.pending.pop(batch.id, None)
-            logger.exception("Could not ask for the capture date of %d photo(s)", len(batch.paths))
 
     def get(self, batch_id: str) -> PendingBatch | None:
         return self.pending.get(batch_id)
 
     def pop(self, batch_id: str) -> PendingBatch | None:
-        return self.pending.pop(batch_id, None)
+        batch = self.pending.pop(batch_id, None)
+        if batch is not None:
+            self.seal(batch)
+        return batch
 
     def awaiting_text(self) -> PendingBatch | None:
         """The most recent batch whose user chose "Other date…"."""

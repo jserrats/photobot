@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ def make_context(download_dir: Path, file: object | None = None) -> MagicMock:
     context.bot.get_file = AsyncMock(return_value=file)
     context.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
     context.bot.edit_message_reply_markup = AsyncMock()
+    context.bot.delete_message = AsyncMock()
     return context
 
 
@@ -150,18 +152,70 @@ def capture_dates(batch: PendingBatch) -> list[bytes]:
     return [piexif.load(str(p))["Exif"].get(piexif.ExifIFD.DateTimeOriginal) for p in batch.paths]
 
 
-async def test_photo_without_exif_is_queued_for_dating(download_dir: Path) -> None:
+async def send_photo(context: MagicMock, n: int) -> None:
+    """Deliver one EXIF-less photo to ``save_media``, as Telegram would."""
     message = make_message(photo=True)
-    message.date = WHEN
+    message.date = datetime(2024, 5, 6, 7, 8, n, tzinfo=UTC)
+    context.bot.get_file = AsyncMock(
+        return_value=make_file(file_unique_id=f"u{n}", payload=FIXTURE.read_bytes())
+    )
     update = MagicMock(effective_message=message, effective_chat=MagicMock(id=42))
-    context = make_context(download_dir, make_file(payload=FIXTURE.read_bytes()))
-
     await save_media(update, context)
+    await asyncio.sleep(0)  # let the picker refresh run
+
+
+async def test_the_picker_arrives_right_after_the_photo(download_dir: Path) -> None:
+    context = make_context(download_dir)
+    await send_photo(context, 1)
 
     tracker = context.bot_data[TRACKER_KEY]
     assert tracker.open is not None
-    assert [p.name for p in tracker.open.paths] == ["20240506_070809_AQADuniq.jpg"]
-    tracker.open.timer.cancel()
+    assert [p.name for p in tracker.open.paths] == ["20240506_070801_u1.jpg"]
+
+    context.bot.send_message.assert_awaited_once()
+    kwargs = context.bot.send_message.await_args.kwargs
+    assert kwargs["text"] == "1 photo(s) arrived without a capture date. When were they taken?"
+    assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Today"
+    assert tracker.open.prompt_message_id == 99
+    context.bot.delete_message.assert_not_awaited()
+    tracker.seal(tracker.open)
+
+
+async def test_a_second_photo_deletes_the_old_picker_and_resends(download_dir: Path) -> None:
+    context = make_context(download_dir)
+    context.bot.send_message = AsyncMock(
+        side_effect=[MagicMock(message_id=101), MagicMock(message_id=102)]
+    )
+
+    await send_photo(context, 1)
+    await send_photo(context, 2)
+
+    # One picker at a time, always the newest message, with an honest count.
+    assert context.bot.send_message.await_count == 2
+    assert context.bot.send_message.await_args.kwargs["text"].startswith("2 photo(s)")
+    context.bot.delete_message.assert_awaited_once_with(chat_id=42, message_id=101)
+
+    tracker = context.bot_data[TRACKER_KEY]
+    assert tracker.open is not None
+    assert tracker.open.prompt_message_id == 102
+    assert len(tracker.pending) == 1  # still one question for both photos
+    tracker.seal(tracker.open)
+
+
+async def test_a_failed_delete_leaves_the_new_picker_in_place(download_dir: Path) -> None:
+    context = make_context(download_dir)
+    context.bot.send_message = AsyncMock(
+        side_effect=[MagicMock(message_id=101), MagicMock(message_id=102)]
+    )
+    context.bot.delete_message = AsyncMock(side_effect=BadRequest("Message can't be deleted"))
+
+    await send_photo(context, 1)
+    await send_photo(context, 2)
+
+    tracker = context.bot_data[TRACKER_KEY]
+    assert tracker.open is not None
+    assert tracker.open.prompt_message_id == 102
+    tracker.seal(tracker.open)
 
 
 async def test_photo_that_already_has_a_date_is_not_queued(download_dir: Path) -> None:
@@ -250,9 +304,11 @@ async def test_other_then_typed_date_applies(download_dir: Path) -> None:
     batch = make_batch(download_dir)
     tracker.pending[batch.id] = batch
 
+    tracker.open = batch
     await date_chosen(make_callback_update("d:abc123:other"), context)
     assert batch.awaiting_text is True
     assert tracker.pending == {batch.id: batch}
+    assert tracker.open is None  # answering closes it to new photos
 
     reply = MagicMock(text="15/01/2024", reply_to_message=None, chat_id=42)
     reply.reply_text = AsyncMock()

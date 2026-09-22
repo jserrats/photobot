@@ -106,23 +106,31 @@ def _queue_for_dating(update: Update, context: ContextTypes.DEFAULT_TYPE, path: 
     settings = _settings(context)
     tracker = _tracker(context)
 
-    async def on_ready(batch: PendingBatch) -> None:
-        await _send_prompt(context, chat_id, batch, settings)
+    async def on_change(batch: PendingBatch) -> None:
+        await _refresh_prompt(context, chat_id, batch, settings)
 
     tracker.add(
         path,
         window=settings.date_prompt_window,
         loop=asyncio.get_running_loop(),
-        on_ready=on_ready,
+        on_change=on_change,
     )
 
 
-async def _send_prompt(
+async def _refresh_prompt(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     batch: PendingBatch,
     settings: Settings,
 ) -> None:
+    """Put the question at the bottom of the chat, with an up-to-date count.
+
+    Telegram cannot move a message, so a batch that grew gets a brand new picker and the
+    previous one is deleted. The new one is sent first: if the delete then fails, a stale
+    picker is left above, which still answers for the same batch, whereas deleting first
+    and failing to send would leave the photos with no way to be dated at all.
+    """
+    previous = batch.prompt_message_id
     today = datetime.now(settings.timezone).date()
     prompt = await context.bot.send_message(
         chat_id=chat_id,
@@ -130,6 +138,12 @@ async def _send_prompt(
         reply_markup=dating.build_keyboard(batch.id, today),
     )
     batch.prompt_message_id = prompt.message_id
+
+    if previous is not None:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=previous)
+        except TelegramError as exc:
+            logger.warning("Could not delete the previous date picker: %s", exc)
 
 
 def _apply_date(batch: PendingBatch, day: date) -> int:
@@ -177,6 +191,9 @@ async def date_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if action == dating.OTHER_ACTION:
+        # The user is answering, so later photos start a batch of their own rather than
+        # joining one whose question is already half-answered.
+        tracker.seal(batch)
         batch.awaiting_text = True
         await _edit_prompt(
             query,
